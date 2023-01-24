@@ -2,6 +2,7 @@ package main
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"encoding/hex"
 	"flag"
@@ -14,6 +15,8 @@ import (
 	"time"
 
 	"github.com/briandowns/spinner"
+	"github.com/schollz/progressbar/v3"
+
 	"github.com/wormhole-foundation/wormhole-explorer/fly/storage"
 	"github.com/wormhole-foundation/wormhole/sdk/vaa"
 	"go.mongodb.org/mongo-driver/mongo"
@@ -31,6 +34,7 @@ type Workpool struct {
 	WG      sync.WaitGroup
 	DB      *mongo.Database
 	Log     *zap.Logger
+	Bar     *progressbar.ProgressBar
 }
 
 func (b *Backfiller) Run() error {
@@ -41,7 +45,18 @@ func (b *Backfiller) Run() error {
 
 	s := spinner.New(spinner.CharSets[14], 100*time.Millisecond)
 	s.Color("red")
+	s.Suffix = fmt.Sprintf(" counting lines")
+
 	s.Start()
+	pLines, err := b.countLines()
+	if err != nil {
+		return err
+	}
+	s.Stop()
+
+	fmt.Printf("lines: %d \n ", pLines)
+
+	b.Workpool.Bar = progressbar.Default(int64(pLines))
 
 	counter := 0
 	defer f.Close()
@@ -59,7 +74,7 @@ func (b *Backfiller) Run() error {
 		b.Workpool.Queue <- string(line)
 		counter += 1
 		if counter%100 == 0 {
-			s.Suffix = fmt.Sprintf(" : %d lines", counter)
+			//			s.Suffix = fmt.Sprintf(" : %d lines", counter)
 		}
 	}
 
@@ -69,11 +84,32 @@ func (b *Backfiller) Run() error {
 
 	b.Workpool.WG.Wait()
 
-	s.Stop()
-
 	fmt.Printf("processed %d lines\n", counter)
 
 	return nil
+}
+
+func (b *Backfiller) countLines() (int, error) {
+	file, _ := os.Open(b.Filename)
+	defer file.Close()
+
+	buf := make([]byte, 32*1024)
+	count := 0
+	lineSep := []byte{'\n'}
+
+	for {
+		c, err := file.Read(buf)
+		count += bytes.Count(buf[:c], lineSep)
+
+		switch {
+		case err == io.EOF:
+			return count, nil
+
+		case err != nil:
+			return count, err
+		}
+	}
+
 }
 
 func NewWorkpool(ctx context.Context, workers int) *Workpool {
@@ -112,7 +148,6 @@ func (w *Workpool) process(ctx context.Context) error {
 				return nil
 			}
 			tokens := strings.Split(line, ",")
-			//header := strings.Split(tokens[0], ":")
 			//fmt.Printf("bcid %s, emmiter %s, seq %s\n", header[0], header[1], header[2])
 
 			data, err := hex.DecodeString(tokens[1])
@@ -135,12 +170,13 @@ func (w *Workpool) process(ctx context.Context) error {
 				break
 			}
 
+			w.Bar.Add(1) // its safe to call Add concurrently
+
 		}
 	}
 
 }
 
-// Path: cmd/backfiller/main.go
 func main() {
 
 	var filename string
@@ -163,7 +199,6 @@ func main() {
 	wp := NewWorkpool(ctx, 100)
 
 	b := Backfiller{
-		//Filename: "/mnt/d/Downloads/2023-01-18T20_01_57.034Z-signed.csv",
 		Filename: filename,
 		Workpool: wp,
 	}
